@@ -57,9 +57,18 @@ def insert_historical_data(conn, stock_id, df):
     with conn.cursor() as cur:
         data = [
             (stock_id, date.strftime('%Y-%m-%d'), row['Open'], row['High'], row['Low'], 
-             row['Close'], row['Volume'])
+             row['Close'], row['Volume'], row['Low'], row['High'])
             for date, row in df.iterrows()
-            if not pd.isna(row['Open'])  # Ignora linhas com dados faltantes
+            if not pd.isna(row['Open']) and 
+               not pd.isna(row['High']) and 
+               not pd.isna(row['Low']) and 
+               not pd.isna(row['Close']) and 
+               not pd.isna(row['Volume']) and
+               row['Volume'] > 0 and  # Garante que teve negociação
+               row['Open'] > 0 and    # Garante que os preços são válidos
+               row['High'] > 0 and
+               row['Low'] > 0 and
+               row['Close'] > 0
         ]
         
         if not data:  # Se não houver dados válidos após a filtragem
@@ -67,17 +76,19 @@ def insert_historical_data(conn, stock_id, df):
         
         execute_values(cur,
             """
-            INSERT INTO historical_data (stock_id, date, open, high, low, close, volume)
+            INSERT INTO historical_data (stock_id, date, open, high, low, close, volume, min_price, max_price)
             VALUES %s
             ON CONFLICT (stock_id, date) DO UPDATE SET
                 open = EXCLUDED.open,
                 high = EXCLUDED.high,
                 low = EXCLUDED.low,
                 close = EXCLUDED.close,
-                volume = EXCLUDED.volume
+                volume = EXCLUDED.volume,
+                min_price = EXCLUDED.min_price,
+                max_price = EXCLUDED.max_price
             """,
             data,
-            template="(%s, %s, %s, %s, %s, %s, %s)"
+            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         return len(data)
 
@@ -89,11 +100,12 @@ def collect_stock_data(symbol, start_date=None):
     ticker = yf.Ticker(f"{symbol}.SA")
     
     try:
-        # Se tiver data inicial, puxa só a partir dela
-        if start_date:
-            df = ticker.history(start=start_date, interval='1d')
-        else:
-            df = ticker.history(period="max", interval='1d')
+        # Define data mínima como 02/01/2023 se não houver data inicial
+        if not start_date:
+            start_date = datetime(2023, 1, 2).date()
+        
+        # Coleta os dados históricos
+        df = ticker.history(start=start_date, interval='1d')
         
         # Obtém informações básicas do ativo
         try:

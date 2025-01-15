@@ -2,7 +2,7 @@ name: Collect Stock Data
 
 on:
   schedule:
-    - cron: "0 20 * * 1-5" # Roda às 20h nos dias úteis
+    - cron: "0 23 * * 1-5" # Roda às 23h nos dias úteis
     - cron: "0 4 * * 1-5" # Roda às 4h nos dias úteis
   workflow_dispatch: # Permite execução manual
 
