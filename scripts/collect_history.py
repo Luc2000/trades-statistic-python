@@ -96,14 +96,17 @@ def collect_stock_data(symbol, start_date=None):
     # Adiciona um pequeno delay para evitar sobrecarga
     sleep(0.5)
     
+    # Define data mínima como 02/01/2023 se não houver data inicial
+    if not start_date:
+        start_date = datetime(2023, 1, 2).date()
+    
+    end_date = datetime.now().date()
+    logging.info(f"Coletando {symbol} - Período: {start_date} até {end_date}")
+    
     # Adiciona sufixo .SA para ações brasileiras
     ticker = yf.Ticker(f"{symbol}.SA")
     
     try:
-        # Define data mínima como 02/01/2023 se não houver data inicial
-        if not start_date:
-            start_date = datetime(2023, 1, 2).date()
-        
         # Coleta os dados históricos
         df = ticker.history(start=start_date, interval='1d')
         
@@ -111,9 +114,16 @@ def collect_stock_data(symbol, start_date=None):
         try:
             info = ticker.info
             name = info.get('longName', symbol)
+            sector = info.get('sector', 'N/A')
+            industry = info.get('industry', 'N/A')
+            logging.info(f"Dados do ativo: {symbol} - {name}")
+            logging.info(f"Setor: {sector} | Indústria: {industry}")
         except:
             name = symbol  # Se não conseguir obter o nome, usa o símbolo
-            logging.warning(f"Não foi possível obter o nome para {symbol}")
+            logging.warning(f"Não foi possível obter informações adicionais para {symbol}")
+        
+        if not df.empty:
+            logging.info(f"Dados obtidos: {len(df)} registros | Primeiro: {df.index.min().strftime('%Y-%m-%d')} | Último: {df.index.max().strftime('%Y-%m-%d')}")
         
         return name, df
     except Exception as e:
@@ -122,13 +132,16 @@ def collect_stock_data(symbol, start_date=None):
 
 def process_symbol(symbol, conn):
     try:
-        logging.info(f"Iniciando coleta de {symbol}")
+        logging.info(f"\n{'='*50}")
+        logging.info(f"Processando {symbol}")
         
         # Verifica se o ativo já existe e pega sua última data
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM stocks WHERE symbol = %s", (symbol,))
+            cur.execute("SELECT id, name FROM stocks WHERE symbol = %s", (symbol,))
             result = cur.fetchone()
-            stock_id = result[0] if result else None
+            if result:
+                stock_id, current_name = result
+                logging.info(f"Ativo encontrado no banco: ID {stock_id} | Nome: {current_name}")
         
         # Se existe, pega última data de atualização
         start_date = None
@@ -137,13 +150,16 @@ def process_symbol(symbol, conn):
             if last_date:
                 start_date = last_date + timedelta(days=1)
                 if start_date >= datetime.now().date():
-                    logging.info(f"Dados de {symbol} já estão atualizados")
+                    logging.info(f"Dados de {symbol} já atualizados. Última atualização: {last_date}")
+                    logging.info(f"{'='*50}\n")
                     return
+                logging.info(f"Última atualização: {last_date} | Buscando dados a partir de: {start_date}")
         
         # Coleta dados
         name, df = collect_stock_data(symbol, start_date)
         if name is None or df.empty:
             logging.warning(f"Sem dados para processar para {symbol}")
+            logging.info(f"{'='*50}\n")
             return
         
         # Insere ou atualiza o ativo
@@ -153,11 +169,14 @@ def process_symbol(symbol, conn):
         rows_inserted = insert_historical_data(conn, stock_id, df)
         
         conn.commit()
-        logging.info(f"Dados de {symbol} inseridos com sucesso! ({rows_inserted} registros)")
+        logging.info(f"Dados de {symbol} inseridos com sucesso!")
+        logging.info(f"Registros inseridos/atualizados: {rows_inserted}")
+        logging.info(f"{'='*50}\n")
         
     except Exception as e:
         conn.rollback()
         logging.error(f"Erro ao processar {symbol}: {str(e)}")
+        logging.info(f"{'='*50}\n")
 
 def main():
     # Lista completa de símbolos
