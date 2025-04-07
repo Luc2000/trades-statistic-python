@@ -1,0 +1,32 @@
+name: Keep Repository Active
+
+on:
+  schedule:
+    # Executa a cada 45 dias (aproximadamente uma vez por mês e meio)
+    - cron: "0 0 1,15 * *" # Executa nos dias 1 e 15 de cada mês às 00:00 UTC
+
+  # Permite execução manual
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
+      - name: Update timestamp file
+        run: |
+          # Cria ou atualiza um arquivo com a data atual
+          echo "Última atualização: $(date)" > .github/keep-alive-timestamp.txt
+
+      - name: Commit and push if changed
+        run: |
+          git add .github/keep-alive-timestamp.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Atualização automática para manter o repositório ativo" && git push)

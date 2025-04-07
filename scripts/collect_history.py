@@ -8,7 +8,10 @@ import psycopg2
 from psycopg2.extras import execute_values
 import concurrent.futures
 import logging
-from time import sleep
+import time
+import random
+import requests
+from urllib3.exceptions import HTTPError
 
 # Configuração de logging
 logging.basicConfig(
@@ -25,6 +28,31 @@ load_dotenv()
 
 # Configuração do Supabase (via Postgres direto)
 DB_URL = os.getenv('DATABASE_URL')
+
+# Aliases para tickers problemáticos
+SYMBOL_ALIASES = {
+    "TRPL4": ["TRPL4.SA", "TRPL4F.SA", "ISA.SA", "TRPL3.SA"],
+    "VBBR3": ["VBBR3.SA", "BRDT3.SA"],  # Antigo nome da Vibra Energia
+    "BRPR3": ["BRPR3.SA", "BRPR11.SA"],
+    "SOMA3": ["SOMA3.SA"],
+    "SQIA3": ["SQIA3.SA"],
+}
+
+# Lista de User-Agents para rotacionar
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36",
+]
+
+def setup_random_user_agent():
+    """Configura um User-Agent aleatório para evitar bloqueios"""
+    user_agent = random.choice(USER_AGENTS)
+    session = requests.Session()
+    session.headers.update({"User-Agent": user_agent})
+    return session
 
 def get_last_update_date(conn, stock_id):
     with conn.cursor() as cur:
@@ -92,10 +120,10 @@ def insert_historical_data(conn, stock_id, df):
         )
         return len(data)
 
-def collect_stock_data(symbol, start_date=None):
-    # Adiciona um pequeno delay para evitar sobrecarga
-    sleep(0.5)
-    
+def collect_stock_data(symbol, start_date=None, max_retries=3):
+    """
+    Coleta dados de um símbolo com retry e backoff exponencial.
+    """
     # Define data mínima como 02/01/2023 se não houver data inicial
     if not start_date:
         start_date = datetime(2023, 1, 2).date()
@@ -103,39 +131,98 @@ def collect_stock_data(symbol, start_date=None):
     end_date = datetime.now().date()
     logging.info(f"Coletando {symbol} - Período: {start_date} até {end_date}")
     
-    # Adiciona sufixo .SA para ações brasileiras
-    ticker = yf.Ticker(f"{symbol}.SA")
+    # Configura um User-Agent aleatório
+    session = setup_random_user_agent()
     
-    try:
-        # Coleta os dados históricos
-        df = ticker.history(start=start_date, interval='1d')
-        
-        # Obtém informações básicas do ativo
+    retry = 0
+    delay = 1
+    name = symbol
+    
+    while retry < max_retries:
         try:
-            info = ticker.info
-            name = info.get('longName', symbol)
-            sector = info.get('sector', 'N/A')
-            industry = info.get('industry', 'N/A')
-            logging.info(f"Dados do ativo: {symbol} - {name}")
-            logging.info(f"Setor: {sector} | Indústria: {industry}")
-        except:
-            name = symbol  # Se não conseguir obter o nome, usa o símbolo
-            logging.warning(f"Não foi possível obter informações adicionais para {symbol}")
+            # Adiciona delay para não sobrecarregar a API
+            if retry > 0:
+                jitter = random.uniform(0.5, 1.5)  # Adiciona aleatoriedade ao delay
+                sleep_time = delay * jitter
+                logging.info(f"Tentativa {retry+1} para {symbol} - Aguardando {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+                delay *= 2  # Backoff exponencial
+            
+            # Tenta obter os dados sem sufixo
+            ticker = yf.Ticker(symbol, session=session)
+            df = ticker.history(start=start_date, end=end_date, interval='1d')
+            
+            # Se não obtiver dados, tenta com sufixo .SA
+            if df.empty:
+                logging.info(f"Sem dados para {symbol} sem sufixo. Tentando com sufixo .SA")
+                ticker_sa = yf.Ticker(f"{symbol}.SA", session=session)
+                df = ticker_sa.history(start=start_date, end=end_date, interval='1d')
+                ticker = ticker_sa if not df.empty else ticker
+            
+            # Obtém informações básicas do ativo
+            try:
+                info = ticker.info
+                if info:
+                    name = info.get('longName', info.get('shortName', symbol))
+                    sector = info.get('sector', 'N/A')
+                    industry = info.get('industry', 'N/A')
+                    logging.info(f"Dados do ativo: {symbol} - {name}")
+                    logging.info(f"Setor: {sector} | Indústria: {industry}")
+            except Exception as info_err:
+                logging.warning(f"Não foi possível obter informações adicionais para {symbol}: {str(info_err)}")
+            
+            if not df.empty:
+                logging.info(f"Dados obtidos: {len(df)} registros | Primeiro: {df.index.min().strftime('%Y-%m-%d')} | Último: {df.index.max().strftime('%Y-%m-%d')}")
+                return name, df
+            
+            # Se não conseguiu dados, tenta próxima tentativa
+            retry += 1
+            logging.warning(f"Não foi possível obter dados para {symbol} na tentativa {retry}")
         
-        if not df.empty:
-            logging.info(f"Dados obtidos: {len(df)} registros | Primeiro: {df.index.min().strftime('%Y-%m-%d')} | Último: {df.index.max().strftime('%Y-%m-%d')}")
+        except Exception as e:
+            retry += 1
+            logging.error(f"Erro ao coletar dados de {symbol} (tentativa {retry}): {str(e)}")
+            
+            # Se for erro específico de rede, pode tentar novamente
+            if isinstance(e, (requests.exceptions.RequestException, HTTPError)):
+                continue
+    
+    logging.error(f"Falha ao obter dados para {symbol} após {max_retries} tentativas")
+    return name, pd.DataFrame()
+
+def try_aliases(symbol, start_date=None):
+    """
+    Tenta coletar dados do símbolo usando seus aliases conhecidos.
+    """
+    # Primeiro tenta com o símbolo original
+    name, df = collect_stock_data(symbol, start_date)
+    
+    # Se não conseguiu e o símbolo tem aliases, tenta com eles
+    if df.empty and symbol in SYMBOL_ALIASES:
+        logging.info(f"Tentando aliases para {symbol}")
         
-        return name, df
-    except Exception as e:
-        logging.error(f"Erro ao coletar dados de {symbol}: {str(e)}")
-        return None, pd.DataFrame()
+        for alias in SYMBOL_ALIASES[symbol]:
+            if alias == symbol:
+                continue
+                
+            alias_name, alias_df = collect_stock_data(alias, start_date)
+            
+            if not alias_df.empty:
+                logging.info(f"Dados obtidos com o alias {alias} para {symbol}")
+                return alias_name, alias_df
+    
+    return name, df
 
 def process_symbol(symbol, conn):
     try:
         logging.info(f"\n{'='*50}")
         logging.info(f"Processando {symbol}")
         
+        # Remove espaços extras no início/fim, se houver
+        symbol = symbol.strip()
+        
         # Verifica se o ativo já existe e pega sua última data
+        stock_id = None
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM stocks WHERE symbol = %s", (symbol,))
             result = cur.fetchone()
@@ -155,8 +242,9 @@ def process_symbol(symbol, conn):
                     return
                 logging.info(f"Última atualização: {last_date} | Buscando dados a partir de: {start_date}")
         
-        # Coleta dados
-        name, df = collect_stock_data(symbol, start_date)
+        # Coleta dados, tentando aliases se necessário
+        name, df = try_aliases(symbol, start_date)
+        
         if name is None or df.empty:
             logging.warning(f"Sem dados para processar para {symbol}")
             logging.info(f"{'='*50}\n")
@@ -176,10 +264,12 @@ def process_symbol(symbol, conn):
     except Exception as e:
         conn.rollback()
         logging.error(f"Erro ao processar {symbol}: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
         logging.info(f"{'='*50}\n")
 
 def main():
-    # Lista completa de símbolos
+    # Lista completa de símbolos (corrigida para remover espaço no VBBR3)
     symbols = [
       "AALR3", "ABCB4", "ABEV3", "AERI3", "AESB3", "AGRO3", "ALPA4", "ALOS3", "ALUP11", "AMBP3", "ANIM3", "ARML3", "ARZZ3", "ASAI3", "AURE3", "AZUL4", "B3SA3", "BBAS3", "BBDC3",
       "BBDC4",
@@ -334,7 +424,7 @@ def main():
       "USIM5",
       "VALE3",
       "VAMO3",
-      " VBBR3",
+      "VBBR3",  # Corrigido para remover espaço
       "VIVA3",
       "VIVT3",
       "VLID3",
@@ -347,17 +437,33 @@ def main():
     
     start_time = datetime.now()
     logging.info(f"Iniciando coleta de dados - {start_time}")
+    logging.info(f"Versão do yfinance: {yf.__version__}")
     
     try:
-        conn = psycopg2.connect(DB_URL)
+        # Configura o timeout mais alto para conexões mais lentas
+        conn = psycopg2.connect(DB_URL, connect_timeout=30)
         
-        # Usa ThreadPoolExecutor para processar múltiplos símbolos em paralelo
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [
-                executor.submit(process_symbol, symbol, conn)
-                for symbol in symbols
-            ]
-            concurrent.futures.wait(futures)
+        # Define o número máximo de workers com base no número de CPUs disponíveis
+        max_workers = min(10, os.cpu_count() or 4)
+        logging.info(f"Utilizando {max_workers} threads para processamento")
+        
+        # Processa os símbolos com ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Limita o número de requisições concorrentes para evitar sobrecarga
+            batch_size = 10
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i+batch_size]
+                logging.info(f"Processando lote de {len(batch)} símbolos ({i+1}-{i+len(batch)} de {len(symbols)})")
+                
+                futures = [
+                    executor.submit(process_symbol, symbol, conn)
+                    for symbol in batch
+                ]
+                concurrent.futures.wait(futures)
+                
+                # Pequena pausa entre lotes para evitar sobrecarga
+                if i + batch_size < len(symbols):
+                    time.sleep(5)
         
     except Exception as e:
         logging.error(f"Erro de conexão: {str(e)}")
