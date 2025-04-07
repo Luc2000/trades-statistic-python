@@ -8,6 +8,10 @@ on:
   # Permite execução manual
   workflow_dispatch:
 
+# Adicionar permissões necessárias
+permissions:
+  contents: write
+
 jobs:
   keep-alive:
     runs-on: ubuntu-latest
