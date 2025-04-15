@@ -12,6 +12,7 @@ import time
 import random
 import requests
 from urllib3.exceptions import HTTPError
+import signal
 
 # Configuração de logging
 logging.basicConfig(
@@ -28,6 +29,9 @@ load_dotenv()
 
 # Configuração do Supabase (via Postgres direto)
 DB_URL = os.getenv('DATABASE_URL')
+
+# Timeout global para garantir que o script termine (25 minutos)
+SCRIPT_TIMEOUT = int(os.getenv('SCRIPT_TIMEOUT', 25 * 60))  # 25 minutos em segundos
 
 # Aliases para tickers problemáticos
 SYMBOL_ALIASES = {
@@ -46,6 +50,22 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36",
 ]
+
+# Variável global para controlar se o script está rodando ou já atingiu o timeout
+script_running = True
+
+def setup_timeout_handler():
+    """Configura um handler para o timeout global do script"""
+    def timeout_handler(signum, frame):
+        global script_running
+        script_running = False
+        logging.warning(f"Atingido o tempo limite de execução ({SCRIPT_TIMEOUT//60} minutos). Finalizando o script...")
+    
+    # Registrar o handler apenas em sistemas que suportam SIGALRM (Unix/Linux)
+    if hasattr(signal, 'SIGALRM'):
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(SCRIPT_TIMEOUT)
+        logging.info(f"Timeout configurado para {SCRIPT_TIMEOUT//60} minutos")
 
 def setup_random_user_agent():
     """Configura um User-Agent aleatório para evitar bloqueios"""
@@ -138,7 +158,7 @@ def collect_stock_data(symbol, start_date=None, max_retries=3):
     delay = 1
     name = symbol
     
-    while retry < max_retries:
+    while retry < max_retries and script_running:
         try:
             # Adiciona delay para não sobrecarregar a API
             if retry > 0:
@@ -198,10 +218,13 @@ def try_aliases(symbol, start_date=None):
     name, df = collect_stock_data(symbol, start_date)
     
     # Se não conseguiu e o símbolo tem aliases, tenta com eles
-    if df.empty and symbol in SYMBOL_ALIASES:
+    if df.empty and symbol in SYMBOL_ALIASES and script_running:
         logging.info(f"Tentando aliases para {symbol}")
         
         for alias in SYMBOL_ALIASES[symbol]:
+            if not script_running:
+                break
+                
             if alias == symbol:
                 continue
                 
@@ -214,6 +237,10 @@ def try_aliases(symbol, start_date=None):
     return name, df
 
 def process_symbol(symbol, conn):
+    if not script_running:
+        logging.warning(f"Pulando processamento de {symbol} devido ao timeout global")
+        return
+        
     try:
         logging.info(f"\n{'='*50}")
         logging.info(f"Processando {symbol}")
@@ -269,6 +296,9 @@ def process_symbol(symbol, conn):
         logging.info(f"{'='*50}\n")
 
 def main():
+    # Configura o timeout global
+    setup_timeout_handler()
+    
     # Lista completa de símbolos (corrigida para remover espaço no VBBR3)
     symbols = [
       "AALR3", "ABCB4", "ABEV3", "AERI3", "AESB3", "AGRO3", "ALPA4", "ALOS3", "ALUP11", "AMBP3", "ANIM3", "ARML3", "ARZZ3", "ASAI3", "AURE3", "AZUL4", "B3SA3", "BBAS3", "BBDC3",
@@ -444,7 +474,7 @@ def main():
         conn = psycopg2.connect(DB_URL, connect_timeout=30)
         
         # Define o número máximo de workers com base no número de CPUs disponíveis
-        max_workers = min(10, os.cpu_count() or 4)
+        max_workers = min(8, os.cpu_count() or 4)
         logging.info(f"Utilizando {max_workers} threads para processamento")
         
         # Processa os símbolos com ThreadPoolExecutor
@@ -452,6 +482,10 @@ def main():
             # Limita o número de requisições concorrentes para evitar sobrecarga
             batch_size = 10
             for i in range(0, len(symbols), batch_size):
+                if not script_running:
+                    logging.warning("Interrompendo o processamento de novos lotes devido ao timeout global")
+                    break
+                    
                 batch = symbols[i:i+batch_size]
                 logging.info(f"Processando lote de {len(batch)} símbolos ({i+1}-{i+len(batch)} de {len(symbols)})")
                 
@@ -462,7 +496,7 @@ def main():
                 concurrent.futures.wait(futures)
                 
                 # Pequena pausa entre lotes para evitar sobrecarga
-                if i + batch_size < len(symbols):
+                if i + batch_size < len(symbols) and script_running:
                     time.sleep(5)
         
     except Exception as e:

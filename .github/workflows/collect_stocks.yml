@@ -2,13 +2,22 @@ name: Collect Stock Data
 
 on:
   schedule:
-    - cron: "0 23 * * 1-5" # Roda às 23h nos dias úteis
-    - cron: "0 4 * * 1-5" # Roda às 4h nos dias úteis
+    - cron: "0 18 * * 0,1-5" # Roda às 18h nos domingos e dias úteis
+    - cron: "0 21 * * 0,1-5" # Roda às 21h nos domingos e dias úteis
+    - cron: "0 0 * * 0,2-6" # Roda à meia-noite nos domingos e dias úteis (00h)
+    - cron: "0 4 * * 0,1-5" # Roda às 4h nos domingos e dias úteis
+    - cron: "0 7 * * 0,1-5" # Roda às 7h nos domingos e dias úteis
   workflow_dispatch: # Permite execução manual
 
+# Adicionar permissões
+permissions:
+  contents: read
+
+# Configurar timeout de 30 minutos (o padrão é 6 horas, mas vamos ser explícitos)
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # Aumentar se necessário
 
     steps:
       - uses: actions/checkout@v3
@@ -24,7 +33,19 @@ jobs:
           pip install --upgrade yfinance
           pip install -r requirements.txt
 
+      - name: Check Environment
+        run: |
+          echo "GitHub runner: $(uname -a)"
+          echo "Python version: $(python --version)"
+          echo "Pip version: $(pip --version)"
+          echo "yfinance version: $(python -c 'import yfinance as yf; print(yf.__version__)')"
+          echo "Free disk space: $(df -h /)"
+          echo "Free memory: $(free -h || echo 'free command not available')"
+
       - name: Run collector
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python scripts/collect_history.py
+        run: |
+          echo "Iniciando coleta de dados em $(date)"
+          python -u scripts/collect_history.py
+          echo "Coleta finalizada em $(date)"
