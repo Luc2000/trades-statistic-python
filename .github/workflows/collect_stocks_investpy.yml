@@ -1,0 +1,50 @@
+name: Collect Stock Data with InvestPy
+
+on:
+  schedule:
+    - cron: "0 19 * * 0,1-5" # Roda às 19h nos domingos e dias úteis (1h depois)
+    - cron: "0 22 * * 0,1-5" # Roda às 22h nos domingos e dias úteis (1h depois)
+    - cron: "0 1 * * 0,2-6" # Roda à 1h nos domingos e dias úteis (1h depois)
+    - cron: "0 5 * * 0,1-5" # Roda às 5h nos domingos e dias úteis (1h depois)
+    - cron: "0 8 * * 0,1-5" # Roda às 8h nos domingos e dias úteis (1h depois)
+  workflow_dispatch: # Permite execução manual
+
+# Adicionar permissões
+permissions:
+  contents: read
+
+# Configurar timeout de 30 minutos (o padrão é 6 horas, mas vamos ser explícitos)
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # Aumentar se necessário
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install investpy
+          pip install -r requirements.txt
+
+      - name: Check Environment
+        run: |
+          echo "GitHub runner: $(uname -a)"
+          echo "Python version: $(python --version)"
+          echo "Pip version: $(pip --version)"
+          echo "Free disk space: $(df -h /)"
+          echo "Free memory: $(free -h || echo 'free command not available')"
+
+      - name: Run InvestPy collector
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Iniciando coleta de dados com InvestPy em $(date)"
+          python -u scripts/collect_history_v2.py
+          echo "Coleta finalizada em $(date)"
