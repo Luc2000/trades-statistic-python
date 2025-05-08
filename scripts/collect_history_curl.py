@@ -2,7 +2,7 @@
 # scripts/collect_history_curl.py - Versão com curl_cffi para evitar rate limits
 import pandas as pd
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 from dotenv import load_dotenv
 import psycopg2
@@ -174,9 +174,15 @@ def get_stock_history(symbol, start_date=None, end_date=None, retries=3):
     
     if not start_date:
         start_date = datetime(2023, 1, 1)
+    elif isinstance(start_date, date) and not isinstance(start_date, datetime):
+        # Converter date para datetime
+        start_date = datetime.combine(start_date, datetime.min.time())
     
     if not end_date:
         end_date = datetime.now()
+    elif isinstance(end_date, date) and not isinstance(end_date, datetime):
+        # Converter date para datetime
+        end_date = datetime.combine(end_date, datetime.min.time())
     
     # Converter para timestamp Unix (segundos)
     period1 = int(start_date.timestamp())
